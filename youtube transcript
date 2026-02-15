@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+YouTube Transcript Extractor — OpenClaw Skill
+Extracts video metadata and transcript from YouTube videos.
+
+Usage:
+  python3 youtube_transcript.py <video_url_or_id>
+  python3 youtube_transcript.py https://www.youtube.com/watch?v=XXXXX
+  python3 youtube_transcript.py XXXXX
+
+Saves output to /home/ismael/clawd-shared/skills/youtube/output/<video_id>.json
+"""
+
+import sys
+import os
+import json
+import re
+import subprocess
+from datetime import datetime
+
+OUTPUT_DIR = "/home/ismael/clawd-shared/skills/youtube/output"
+
+
+def ensure_deps():
+    """Install required packages if missing."""
+    deps = {
+        "youtube_transcript_api": "youtube-transcript-api",
+        "yt_dlp": "yt-dlp",
+    }
+    for module, package in deps.items():
+        try:
+            __import__(module)
+        except ImportError:
+            print(f"Installing {package}...")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", package, "--break-system-packages", "-q"],
+                capture_output=True
+            )
+
+
+def extract_video_id(url_or_id: str) -> str:
+    """Extract video ID from URL or return as-is if already an ID."""
+    patterns = [
+        r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'^([a-zA-Z0-9_-]{11})$',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url_or_id)
+        if match:
+            return match.group(1)
+    return url_or_id
+
+
+def get_metadata(video_id: str) -> dict:
+    """Get video metadata using yt-dlp."""
+    try:
+        import yt_dlp
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            return {
+                "title": info.get("title", "Unknown"),
+                "channel": info.get("channel", info.get("uploader", "Unknown")),
+                "duration": info.get("duration", 0),
+                "view_count": info.get("view_count", 0),
+                "upload_date": info.get("upload_date", "Unknown"),
+                "description": (info.get("description", "") or "")[:500],
+                "tags": info.get("tags", [])[:20],
+            }
+    except Exception as e:
+        return {"error": f"Metadata extraction failed: {str(e)}"}
+
+
+def get_transcript(video_id: str) -> list:
+    """Get transcript using youtube-transcript-api."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return transcript
+    except Exception as e:
+        return [{"error": f"Transcript extraction failed: {str(e)}"}]
+
+
+def get_transcript_fallback(video_id: str) -> list:
+    """Fallback: try yt-dlp subtitle extraction."""
+    try:
+        import yt_dlp
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitlesformat': 'json3',
+            'subtitleslangs': ['en'],
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            
+            # Check for subtitles
+            subs = info.get("subtitles", {}) or {}
+            auto_subs = info.get("automatic_captions", {}) or {}
+            
+            for sub_dict in [subs, auto_subs]:
+                if "en" in sub_dict:
+                    for fmt in sub_dict["en"]:
+                        if fmt.get("ext") == "json3":
+                            import urllib.request
+                            data = urllib.request.urlopen(fmt["url"]).read()
+                            return json.loads(data).get("events", [])
+            
+            return [{"error": "No English subtitles available"}]
+    except Exception as e:
+        return [{"error": f"Fallback transcript failed: {str(e)}"}]
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 youtube_transcript.py <video_url_or_id>")
+        sys.exit(1)
+    
+    ensure_deps()
+    
+    video_input = sys.argv[1]
+    video_id = extract_video_id(video_input)
+    
+    print(f"Extracting data for video: {video_id}")
+    print()
+    
+    # Get metadata
+    print("Getting metadata...")
+    metadata = get_metadata(video_id)
+    
+    if "error" not in metadata:
+        print(f"  Title: {metadata['title']}")
+        print(f"  Channel: {metadata['channel']}")
+        print(f"  Duration: {metadata.get('duration', 0) // 60}m {metadata.get('duration', 0) % 60}s")
+    else:
+        print(f"  ⚠ {metadata['error']}")
+    
+    # Get transcript
+    print("Getting transcript...")
+    transcript = get_transcript(video_id)
+    
+    if transcript and "error" in transcript[0]:
+        print(f"  Primary method failed, trying fallback...")
+        transcript = get_transcript_fallback(video_id)
+    
+    # Format transcript as readable text
+    full_text = ""
+    if transcript and "error" not in transcript[0]:
+        full_text = " ".join([
+            entry.get("text", entry.get("segs", [{}])[0].get("utf8", ""))
+            for entry in transcript
+            if isinstance(entry, dict)
+        ])
+        print(f"  ✅ Transcript extracted: {len(full_text)} characters")
+    else:
+        print(f"  ⚠ Could not extract transcript")
+    
+    # Save output
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output = {
+        "video_id": video_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "extracted_at": datetime.now().isoformat(),
+        "metadata": metadata,
+        "transcript_text": full_text,
+        "transcript_segments": transcript if transcript and "error" not in transcript[0] else [],
+    }
+    
+    output_path = os.path.join(OUTPUT_DIR, f"{video_id}.json")
+    with open(output_path, "w") as f:
+        json.dump(output, f, indent=2)
+    
+    print(f"\n✅ Saved to {output_path}")
+    
+    # Print summary
+    if full_text:
+        print(f"\n--- TRANSCRIPT PREVIEW (first 500 chars) ---")
+        print(full_text[:500])
+        print("...")
+
+
+if __name__ == "__main__":
+    main()
