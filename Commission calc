@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+LOCKED Commission Calculator for Ismael — 2Cool HVAC
+Confirmed by COO Carey on Feb 14, 2026
+
+Structure:
+  - Baseline: 2% of revenue
+  - KPI weighting: 50% GM%, 50% NI
+  - 80% soft floor (you still earn below 80%)
+  - 200% cap on weighted achievement
+  - Negative NI: beating budget (losing less) = higher achievement
+
+Usage:
+  python3 commission_calc.py --revenue 55510.28 --gm_pct 69.14 --gm_target 50.0 --ni_actual -442 --ni_target -23498
+  python3 commission_calc.py --revenue 55510.28 --gm_pct 69.14  # uses defaults for targets
+"""
+
+import argparse
+import json
+import sys
+from datetime import datetime
+
+# LOCKED PARAMETERS — DO NOT CHANGE
+BASELINE_PCT = 0.02          # 2% of revenue
+GM_TARGET = 50.0             # 50% gross margin target
+NI_TARGET = -23498.0         # February 2026 budget NI target
+ACHIEVEMENT_CAP = 200.0      # Max weighted achievement
+GM_WEIGHT = 0.50             # 50% weight
+NI_WEIGHT = 0.50             # 50% weight
+
+
+def calc_gm_achievement(actual_gm_pct: float, target_gm_pct: float) -> float:
+    """Calculate GM% achievement. Simple ratio."""
+    if target_gm_pct == 0:
+        return 0.0
+    return (actual_gm_pct / target_gm_pct) * 100.0
+
+
+def calc_ni_achievement(actual_ni: float, target_ni: float) -> float:
+    """
+    Calculate NI achievement.
+    For NEGATIVE targets (budget expects a loss):
+      - Losing LESS than budget = OUTPERFORMANCE = achievement > 100%
+      - Formula: 100% + ((Budget_Loss - Actual_Loss) / |Budget_Loss|) * 100
+    For POSITIVE targets:
+      - Standard ratio: (Actual / Target) * 100
+    """
+    if target_ni < 0:
+        # Negative target: losing less is BETTER
+        variance = abs(target_ni) - abs(actual_ni)  # positive = beat budget
+        achievement = 100.0 + (variance / abs(target_ni)) * 100.0
+        return max(0.0, achievement)  # Floor at 0%
+    elif target_ni == 0:
+        return 100.0 if actual_ni >= 0 else 0.0
+    else:
+        return (actual_ni / target_ni) * 100.0
+
+
+def calc_commission(revenue: float, gm_pct: float, ni_actual: float,
+                    gm_target: float = GM_TARGET, ni_target: float = NI_TARGET) -> dict:
+    """Calculate commission with full breakdown."""
+    
+    baseline = revenue * BASELINE_PCT
+    
+    gm_achievement = calc_gm_achievement(gm_pct, gm_target)
+    ni_achievement = calc_ni_achievement(ni_actual, ni_target)
+    
+    weighted_gm = gm_achievement * GM_WEIGHT
+    weighted_ni = ni_achievement * NI_WEIGHT
+    weighted_total = weighted_gm + weighted_ni
+    
+    # Apply cap
+    capped_total = min(weighted_total, ACHIEVEMENT_CAP)
+    
+    commission = baseline * (capped_total / 100.0)
+    
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "inputs": {
+            "revenue": revenue,
+            "gm_pct_actual": gm_pct,
+            "gm_pct_target": gm_target,
+            "ni_actual": ni_actual,
+            "ni_target": ni_target,
+        },
+        "calculations": {
+            "baseline_2pct": round(baseline, 2),
+            "gm_achievement_pct": round(gm_achievement, 1),
+            "ni_achievement_pct": round(ni_achievement, 1),
+            "weighted_gm": round(weighted_gm, 1),
+            "weighted_ni": round(weighted_ni, 1),
+            "weighted_total": round(weighted_total, 1),
+            "capped_total": round(capped_total, 1),
+            "cap_applied": weighted_total > ACHIEVEMENT_CAP,
+        },
+        "result": {
+            "commission": round(commission, 2),
+            "formula": f"${baseline:.2f} × {capped_total:.1f}% = ${commission:.2f}",
+        },
+        "structure": {
+            "baseline": "2% of revenue",
+            "kpi_split": "50/50 (GM% / NI)",
+            "floor": "80% soft (still earn below)",
+            "cap": "200% max weighted",
+            "confirmed_by": "COO Carey",
+            "confirmed_date": "2026-02-14",
+        }
+    }
+
+
+def print_report(result: dict):
+    """Print human-readable commission report."""
+    r = result
+    c = r["calculations"]
+    i = r["inputs"]
+    
+    print("=" * 55)
+    print("  COMMISSION CALCULATION — 2 Cool HVAC")
+    print("=" * 55)
+    print()
+    print(f"  Revenue MTD:        ${i['revenue']:,.2f}")
+    print(f"  2% Baseline:        ${c['baseline_2pct']:,.2f}")
+    print()
+    print("  KPI ACHIEVEMENTS:")
+    print(f"    GM%:   {i['gm_pct_actual']:.1f}% actual vs {i['gm_pct_target']:.1f}% target = {c['gm_achievement_pct']:.1f}%")
+    print(f"    NI:    ${i['ni_actual']:,.0f} actual vs ${i['ni_target']:,.0f} target = {c['ni_achievement_pct']:.1f}%")
+    print()
+    print("  WEIGHTED (50/50):")
+    print(f"    GM% contribution:  {c['weighted_gm']:.1f}%")
+    print(f"    NI contribution:   {c['weighted_ni']:.1f}%")
+    print(f"    Total weighted:    {c['weighted_total']:.1f}%", end="")
+    if c['cap_applied']:
+        print(f" → CAPPED at {c['capped_total']:.1f}%")
+    else:
+        print()
+    print()
+    print(f"  COMMISSION: {r['result']['formula']}")
+    print()
+    print(f"  ✅ ${r['result']['commission']:,.2f}")
+    print("=" * 55)
+    print(f"  Confirmed by {r['structure']['confirmed_by']} on {r['structure']['confirmed_date']}")
+    print()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="2Cool HVAC Commission Calculator")
+    parser.add_argument("--revenue", type=float, required=True, help="MTD Revenue")
+    parser.add_argument("--gm_pct", type=float, required=True, help="Actual GM%")
+    parser.add_argument("--gm_target", type=float, default=GM_TARGET, help=f"GM% target (default: {GM_TARGET})")
+    parser.add_argument("--ni_actual", type=float, default=0, help="Actual Net Income")
+    parser.add_argument("--ni_target", type=float, default=NI_TARGET, help=f"NI target (default: {NI_TARGET})")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    
+    args = parser.parse_args()
+    
+    result = calc_commission(
+        revenue=args.revenue,
+        gm_pct=args.gm_pct,
+        ni_actual=args.ni_actual,
+        gm_target=args.gm_target,
+        ni_target=args.ni_target,
+    )
+    
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print_report(result)
